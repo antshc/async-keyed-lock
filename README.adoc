@@ -1,0 +1,260 @@
+= Key-Based (Keyed) Locking: Challenges & Best Practices
+
+When you build a *key-based lock* (a “keyed semaphore/lock”: only operations with the same key exclude each other), the hard part isn’t mutual exclusion — it’s everything around *lifecycle, correctness under races, cancellation, and scalability*, without turning your lock manager into a bottleneck or a memory leak.
+
+Below are the *main challenges* and *best practices* to solve them, mapped directly to the kind of implementation you uploaded
+(*AsyncKeyedLocker + dictionary + per-key `SemaphoreSlim`*).
+
+== Components (as referenced)
+
+* AsyncKeyedLocker
+* AsyncKeyedLockDictionary
+* AsyncKeyedLockReleaser
+
+== 1) Race conditions between “get lock object” and “remove lock object”
+
+=== The challenge
+
+Two things happen concurrently:
+
+* *Thread A*: “I’m done with key `K`, release and maybe remove it from the dictionary.”
+* *Thread B*: “I need key `K`, give me the per-key semaphore.”
+
+If you remove the entry too early, thread B might:
+
+* reuse an object that is being disposed, or
+* create *two different semaphores for the same key* (breaking mutual exclusion).
+
+=== Best practices
+
+* *Use a reference count (or equivalent lease) per dictionary entry*
+** Increment when a caller obtains the per-key object
+** Decrement on release
+** Remove from dictionary only when the count reaches zero
+
++
+✔ Your code does this with `ReferenceCount`, removing only when
+`ReferenceCount == 1` inside a critical section.
+
+* *Guard “in use vs removed” with a state flag*
+** `IsNotInUse` prevents resurrecting a lock that has been logically removed.
+
+* *Make increment + “still valid?” atomic*
+** Implemented via `Monitor.TryEnter(this)` inside `TryIncrement()`
+** Atomically checks `IsNotInUse` and increments the count
+
+=== Why this matters
+
+If you get this wrong, you don’t just get a crash — you get *silent correctness bugs*:
+
+* two operations with the same key run concurrently,
+* corrupted files, caches, DB rows, or blob objects.
+
+== 2) Cancellation: avoiding refcount leaks and “stuck forever” entries
+
+=== The challenge
+
+Flow:
+
+. Get or create per-key semaphore object (*refcount++*)
+. `await WaitAsync(...)`
+
+If waiting is *cancelled*, the semaphore was never acquired —
+but the refcount was incremented.
+
+If you don’t fix this:
+
+* dictionary entries remain forever,
+* memory grows,
+* “dead keys” accumulate (especially with high-cardinality keys).
+
+=== Best practices
+
+* *On cancellation before acquisition: decrement refcount without releasing*
+** Your code uses `ReleaseWithoutSemaphoreRelease` in the
+   `OperationCanceledException` path.
+
+* *Be strict about ownership*
+** Only release the semaphore if it was *actually acquired*
+** That’s the distinction between:
+*** `Release()`
+*** `ReleaseWithoutSemaphoreRelease()`
+
+=== Why this matters
+
+Cancellation is normal in real systems (timeouts, shutdowns, aborts).
+If it corrupts bookkeeping, you’ll see:
+
+* memory leaks,
+* growing dictionary contention,
+* mysterious performance degradation over days or weeks.
+
+== 3) Avoiding global contention and scaling with many keys
+
+=== The challenge
+
+A keyed lock reduces contention vs a global lock — unless you accidentally:
+
+* lock the whole dictionary on every operation,
+* use heavy per-key critical sections,
+* allocate excessively.
+
+=== Best practices
+
+* *Use a concurrent dictionary; keep locks per-key*
+** `ConcurrentDictionary<TKey, …>`
+** `Monitor.Enter(releaser)` only for refcount/state updates
+
+* *Keep per-key critical sections tiny*
+** In `Release`, counters and dictionary removal are done inside the monitor
+** `SemaphoreSlim.Release()` is done *outside* the critical section
+   (important to avoid wake-ups while holding locks)
+
+* *Choose an appropriate key comparer*
+** `StringComparer.OrdinalIgnoreCase` avoids duplicate locks for
+   case-different keys (important for file paths / IDs)
+
+=== Why this matters
+
+Keyed locks are used in *hot paths* (IO pipelines, caching, dedupe).
+If the lock manager becomes the bottleneck, you lose the optimization entirely.
+
+== 4) Lifetime management: cleanup, disposal, and “too many keys”
+
+=== The challenge
+
+If keys are unbounded (request IDs, blob URLs, user IDs):
+
+* you can create a semaphore per key indefinitely.
+
+Even with refcount-based removal:
+
+* refcount bugs ⇒ leaks,
+* high churn ⇒ allocation pressure,
+* long waits ⇒ entries live longer than expected.
+
+=== Best practices
+
+* *Refcount-based removal is the baseline*
+** You already remove on last release.
+
+* *Pooling (advanced, risky)*
+** Reduces allocations
+** Introduces ABA risks and stale state reuse
+** Requires strict reset and ownership rules
+
+* *Optional TTL / eviction for extreme cardinality*
+** Prevents pathological memory growth
+** Accepts occasional re-creation cost
+
+=== Why this matters
+
+In production:
+
+----
+high-cardinality keys + long-running service
+= “works in tests” → fails after a week due to memory/GC pressure
+----
+
+== 5) Fairness and starvation: hot keys
+
+=== The challenge
+
+`SemaphoreSlim` is *not strictly fair*. Under heavy contention:
+
+* some waiters may starve,
+* cancellations/timeouts cause churn,
+* throughput degrades.
+
+=== Best practices
+
+* *Keep per-key concurrency = 1 unless needed*
+** You use `m_maxCount = 1`.
+
+* *Always support cancellation/timeouts*
+** Prevents infinite buildup of waiters.
+
+* *Use queued locks only if fairness is required*
+** FIFO queues using `TaskCompletionSource`
+** Higher complexity — only worth it if starvation is observed.
+
+=== Why this matters
+
+Starvation doesn’t throw exceptions.
+It shows up as *random latency spikes* and stuck operations on hot keys.
+
+== 6) “Correct release” discipline: double-release & mis-ownership
+
+=== The challenge
+
+Callers might:
+
+* dispose twice,
+* dispose without owning,
+* forget to dispose.
+
+Any of these can corrupt concurrency.
+
+=== Best practices
+
+* *Return a releaser token and force `using / await using`*
+[source,csharp]
+----
+await using var _ = await locker.LockAsync(key, ct);
+----
+
+* *Optional hardening*: idempotent dispose
+** Add a disposed flag in the releaser
+** Prevents double-release bugs
+
+=== Why this matters
+
+Keyed locks protect correctness-critical resources.
+A single double-release can silently break exclusivity.
+
+== 7) Async vs sync boundaries: mixing Monitor with await
+
+=== The challenge
+
+Holding a synchronous lock across `await` = deadlock risk.
+
+=== Best practices
+
+* Use sync locks only for tiny bookkeeping
+* Do async waiting on `SemaphoreSlim` outside locks
+
+✔ Your design:
+[source]
+----
+Monitor → refcount/state
+await SemaphoreSlim.WaitAsync(...) → outside critical sections
+----
+
+=== Why this matters
+
+This is the difference between:
+
+* a safe async lock manager, and
+* a deadlock generator.
+
+== async-keyed-lock
+
+TaskCompletionSource concept:
+
+----
+“I’ll give you a Task now, and I will decide later when it finishes, fails, or gets canceled.”
+----
+
+[source,csharp]
+----
+var tcs = new TaskCompletionSource<int>();
+
+Task<int> task = tcs.Task; // hand this to consumers
+
+// later, from ANY thread:
+tcs.SetResult(42); // TrySetResult         // completes the task successfully
+// or:
+tcs.SetException(ex);                      // faults the task
+// or:
+tcs.SetCanceled();                         // cancels the task
+----
