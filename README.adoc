@@ -378,6 +378,20 @@ ____
 The retry loop is the mechanism that bridges this gap and makes the keyed-lock implementation correct under extreme concurrency.
 
 
+
+== Specific topics tied to your challenge
+
+Here are some keywords you can search/read that directly match the challenge you’re solving:
+
+- “Safe publication / safe initialization under concurrency”
+- “Reference counting in concurrent systems”
+- “Object resurrection / ABA problem”
+- “Linearizability vs. serializability”
+- “Concurrent hash map entry lifecycle”
+- “Per-key lock manager patterns”
+- “Cancellation + resource cleanup”
+- “Race between creation and removal”
+
 == Testing async code
 
 TaskCompletionSource concept:
