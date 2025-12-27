@@ -35,7 +35,6 @@ internal sealed class AsyncKeyedLockDictionary<TKey> : ConcurrentDictionary<TKey
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Release(AsyncKeyedLockReleaser<TKey> releaser)
     {
         Monitor.Enter(releaser);
@@ -55,7 +54,6 @@ internal sealed class AsyncKeyedLockDictionary<TKey> : ConcurrentDictionary<TKey
         releaser.SemaphoreSlim.Release();
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void ReleaseWithoutSemaphoreRelease(AsyncKeyedLockReleaser<TKey> releaser)
     {
         Monitor.Enter(releaser);
