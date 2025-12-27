@@ -237,7 +237,148 @@ This is the difference between:
 * a safe async lock manager, and
 * a deadlock generator.
 
-== async-keyed-lock
+== 8) Preventing Resurrection of “Dead” Lock Objects (The Retry Loop Challenge)
+
+=== The challange
+
+In a keyed-lock implementation, a dictionary entry (the per-key lock object) can be in a *transitional state*:
+
+- It still exists in the dictionary
+- But it is in the process of being released and removed
+- Or it has already been logically invalidated (`IsNotInUse = true`)
+
+At this moment, another thread may:
+- successfully read the entry from the dictionary
+- but *must not reuse it*
+
+If a caller reuses such an entry, the system may:
+- wait on or release a semaphore that is already considered dead
+- break reference counting
+- accidentally allow multiple semaphores to exist for the same key over time
+
+This leads to *silent loss of mutual exclusion*, which is one of the most dangerous concurrency bugs.
+
+---
+
+=== Why a simple `GetOrAdd` is not enough
+
+A naïve implementation might assume:
+
+____
+If I got an entry from the dictionary, it must be safe to use.
+____
+
+This assumption is *false* under concurrency.
+
+Between:
+- retrieving the entry via `GetOrAdd`
+- and incrementing the reference count
+
+another thread may:
+- decrement the reference count to zero
+- remove the entry from the dictionary
+- mark it as no longer usable
+
+At that point, the object is *visible but invalid*.
+
+---
+
+=== The retry loop
+
+[source,csharp]
+----
+while (true)
+{
+    releaserNoPooling = GetOrAdd(key, releaserToAddNoPooling);
+    if (ReferenceEquals(releaserNoPooling, releaserToAddNoPooling)
+        || releaserNoPooling.TryIncrement())
+    {
+        return releaserNoPooling;
+    }
+}
+----
+
+This loop ensures that the caller only proceeds when it has *safely claimed ownership* of a valid per-key lock object.
+
+---
+
+=== What the loop guarantees
+
+Each iteration enforces one of two safe outcomes.
+
+==== 1. We successfully inserted a new lock object
+
+[source,csharp]
+----
+ReferenceEquals(releaserNoPooling, releaserToAddNoPooling)
+----
+
+This means:
+
+- the dictionary accepted *our* newly created object
+- it starts with `ReferenceCount = 1`
+- it is not marked as `IsNotInUse`
+
+This object is guaranteed to be valid.
+
+---
+
+==== 2. We successfully claimed an existing lock object
+
+[source,csharp]
+----
+releaserNoPooling.TryIncrement()
+----
+
+This means:
+
+- we acquired the per-object monitor
+- we verified `IsNotInUse == false`
+- we atomically incremented `ReferenceCount`
+
+As a result:
+
+- the entry cannot be removed while we are using or waiting on it
+- ownership is clearly established
+
+---
+
+==== If neither condition holds
+
+- The entry is being removed, *or*
+- it has already been logically invalidated
+
+In this case, the loop retries until:
+
+- a fresh object is created, or
+- a valid existing object can be safely claimed
+
+---
+
+=== Why this is critical
+
+This retry loop prevents:
+
+- resurrection of logically dead lock objects
+- use-after-remove bugs
+- reference count corruption
+- multiple active semaphores for the same key
+- silent loss of mutual exclusion
+
+In effect, it makes the keyed-lock acquisition *linearizable* from the caller’s perspective.
+
+---
+
+=== Key takeaway
+
+____
+Seeing a lock object is not the same as safely owning it.
+____
+
+The retry loop is the mechanism that bridges this gap and makes the keyed-lock implementation correct under extreme concurrency.
+
+
+== Testing async code
 
 TaskCompletionSource concept:
 
