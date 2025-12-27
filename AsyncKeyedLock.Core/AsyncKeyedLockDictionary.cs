@@ -1,7 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 
-namespace Zerto.PromotionWorker.Accessors.JournalCache.KeyedLock;
+namespace AsyncKeyedLock.Core;
 
 internal sealed class AsyncKeyedLockDictionary<TKey> : ConcurrentDictionary<TKey, AsyncKeyedLockReleaser<TKey>>, IDisposable
     where TKey : notnull

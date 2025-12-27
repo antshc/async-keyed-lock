@@ -1,4 +1,4 @@
-﻿namespace Zerto.PromotionWorker.Accessors.JournalCache.KeyedLock;
+﻿namespace AsyncKeyedLock.Core;
 
 public sealed class AsyncKeyedLockReleaser<TKey> : IDisposable
     where TKey : notnull

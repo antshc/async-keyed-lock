@@ -1,15 +1,16 @@
+using AsyncKeyedLock.Core;
 using System.Collections.Concurrent;
 using System.Reflection;
 using Xunit.Abstractions;
 
 namespace AsyncKeyedLock.Tests
 {
-    public sealed class KeyedSemaphoreTests
+    public sealed class AsyncKeyedLockerTests
     {
         [Fact]
-        public async Task AcquireAsync_SameKey_IsMutuallyExclusive()
+        public async Task LockAsync_SameKey_IsMutuallyExclusive()
         {
-            var keyed = new KeyedSemaphore();
+            var keyed = new AsyncKeyedLocker();
             var key = "A";
 
             var entered1 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -18,7 +19,7 @@ namespace AsyncKeyedLock.Tests
 
             var t1 = Task.Run(async () =>
             {
-                using (await keyed.AcquireAsync(key))
+                using (await keyed.LockAsync(key, CancellationToken.None))
                 {
                     entered1.TrySetResult();
                     await release1.Task; // hold the lock
@@ -29,7 +30,7 @@ namespace AsyncKeyedLock.Tests
 
             var t2 = Task.Run(async () =>
             {
-                using (await keyed.AcquireAsync(key))
+                using (await keyed.LockAsync(key, CancellationToken.None))
                 {
                     entered2.TrySetResult();
                 }
@@ -47,9 +48,9 @@ namespace AsyncKeyedLock.Tests
         }
 
         [Fact]
-        public async Task AcquireAsync_DifferentKeys_CanRunConcurrently()
+        public async Task LockAsync_DifferentKeys_CanRunConcurrently()
         {
-            var keyed = new KeyedSemaphore();
+            var keyed = new AsyncKeyedLocker();
 
             var enteredA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var enteredB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -57,7 +58,7 @@ namespace AsyncKeyedLock.Tests
 
             var tA = Task.Run(async () =>
             {
-                using (await keyed.AcquireAsync("A"))
+                using (await keyed.LockAsync("A", CancellationToken.None))
                 {
                     enteredA.TrySetResult();
                     await release.Task;
@@ -66,7 +67,7 @@ namespace AsyncKeyedLock.Tests
 
             var tB = Task.Run(async () =>
             {
-                using (await keyed.AcquireAsync("B"))
+                using (await keyed.LockAsync("B", CancellationToken.None))
                 {
                     enteredB.TrySetResult();
                     await release.Task;
@@ -85,9 +86,9 @@ namespace AsyncKeyedLock.Tests
         [Fact]
         public async Task Dispose_IsIdempotent_SecondDisposeDoesNothing()
         {
-            var keyed = new KeyedSemaphore();
+            var keyed = new AsyncKeyedLocker();
 
-            var releaser = await keyed.AcquireAsync("A");
+            var releaser = await keyed.LockAsync("A", CancellationToken.None);
             releaser.Dispose();
 
             // Should not throw
@@ -95,20 +96,20 @@ namespace AsyncKeyedLock.Tests
         }
 
         [Fact]
-        public async Task AcquireAsync_WhenCancelledWhileWaiting_ThrowsAndDoesNotLeakEntry()
+        public async Task LockAsync_WhenCancelledWhileWaiting_ThrowsAndDoesNotLeakEntry()
         {
-            var keyed = new KeyedSemaphore();
+            var keyed = new AsyncKeyedLocker();
             var key = "A";
 
-            // Hold the lock so the next AcquireAsync will wait
-            var hold = await keyed.AcquireAsync(key);
+            // Hold the lock so the next LockAsync will wait
+            var hold = await keyed.LockAsync(key);
 
             using var cts = new CancellationTokenSource();
             cts.CancelAfter(100);
 
             await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
             {
-                await keyed.AcquireAsync(key, cts.Token);
+                await keyed.LockAsync(key, cts.Token);
             });
 
             // Release the holder
@@ -121,12 +122,12 @@ namespace AsyncKeyedLock.Tests
         [Fact]
         public async Task Cleanup_RemovesKeyAfterLastRelease()
         {
-            var keyed = new KeyedSemaphore();
+            var keyed = new AsyncKeyedLocker();
             var key = "cleanup-key";
 
             Assert.False(MapContainsKey(keyed, key));
 
-            using (await keyed.AcquireAsync(key))
+            using (await keyed.LockAsync(key))
             {
                 Assert.True(MapContainsKey(keyed, key));
             }
@@ -138,7 +139,7 @@ namespace AsyncKeyedLock.Tests
         [Fact]
         public async Task Cleanup_DoesNotRemoveWhileAnotherWaiterExists()
         {
-            var keyed = new KeyedSemaphore();
+            var keyed = new AsyncKeyedLocker();
             var key = "A";
 
             // T1 holds lock
@@ -147,7 +148,7 @@ namespace AsyncKeyedLock.Tests
 
             var t1 = Task.Run(async () =>
             {
-                using (await keyed.AcquireAsync(key))
+                using (await keyed.LockAsync(key))
                 {
                     t1Entered.TrySetResult();
                     await t1Release.Task;
@@ -164,7 +165,7 @@ namespace AsyncKeyedLock.Tests
             var t2 = Task.Run(async () =>
             {
                 t2WaitingStarted.TrySetResult();
-                using (await keyed.AcquireAsync(key))
+                using (await keyed.LockAsync(key))
                 {
                     t2Entered.TrySetResult();
                 }
@@ -187,14 +188,14 @@ namespace AsyncKeyedLock.Tests
 
         // ---------------- helpers: reflection to inspect private _map ----------------
 
-        private static object GetMap(KeyedSemaphore keyed)
+        private static object GetMap(AsyncKeyedLocker keyed)
         {
-            var f = typeof(KeyedSemaphore).GetField("_map", BindingFlags.Instance | BindingFlags.NonPublic)
+            var f = typeof(AsyncKeyedLocker).GetField("_map", BindingFlags.Instance | BindingFlags.NonPublic)
                     ?? throw new InvalidOperationException("Could not find _map field via reflection.");
             return f.GetValue(keyed) ?? throw new InvalidOperationException("_map is null.");
         }
 
-        private static int MapCount(KeyedSemaphore keyed)
+        private static int MapCount(AsyncKeyedLocker keyed)
         {
             var map = GetMap(keyed);
             var p = map.GetType().GetProperty("Count", BindingFlags.Instance | BindingFlags.Public)
@@ -202,7 +203,7 @@ namespace AsyncKeyedLock.Tests
             return (int)(p.GetValue(map) ?? 0);
         }
 
-        private static bool MapContainsKey(KeyedSemaphore keyed, string key)
+        private static bool MapContainsKey(AsyncKeyedLocker keyed, string key)
         {
             var map = GetMap(keyed);
 
@@ -213,96 +214,4 @@ namespace AsyncKeyedLock.Tests
             return (bool)(m.Invoke(map, new object[] { key }) ?? false);
         }
     } 
-        public sealed class KeyedSemaphore
-        {
-            private sealed class RefCountedSemaphore
-            {
-                public readonly SemaphoreSlim Semaphore = new(initialCount: 1, maxCount: 1);
-                public int RefCount;
-            }
-
-            private readonly ConcurrentDictionary<string, RefCountedSemaphore> _map =
-                new(StringComparer.Ordinal); // or OrdinalIgnoreCase if you want case-insensitive keys
-
-            public async Task<IDisposable> AcquireAsync(string key, CancellationToken ct = default)
-            {
-                if (key is null) throw new ArgumentNullException(nameof(key));
-
-                // Get/create the per-key semaphore holder and increment refcount atomically
-                var holder = _map.GetOrAdd(key, _ => new RefCountedSemaphore());
-                Interlocked.Increment(ref holder.RefCount);
-
-                try
-                {
-                    await holder.Semaphore.WaitAsync(ct).ConfigureAwait(false);
-                    return new Releaser(this, key, holder);
-                }
-                catch
-                {
-                    // If we failed to acquire (canceled/exception), undo refcount
-                    ReleaseRef(key, holder);
-                    throw;
-                }
-            }
-
-            private void ReleaseRef(string key, RefCountedSemaphore holder)
-            {
-                if (Interlocked.Decrement(ref holder.RefCount) == 0)
-                {
-                    // Best-effort cleanup: remove only if the value is the same instance
-                    _map.TryRemove(new KeyValuePair<string, RefCountedSemaphore>(key, holder));
-                    // Note: we do NOT dispose the SemaphoreSlim here to avoid races with late waiters.
-                    // If you want disposal, you need stronger coordination.
-                }
-            }
-
-            private sealed class Releaser : IDisposable
-            {
-                private readonly KeyedSemaphore _owner;
-                private readonly string _key;
-                private RefCountedSemaphore? _holder;
-
-                public Releaser(KeyedSemaphore owner, string key, RefCountedSemaphore holder)
-                {
-                    _owner = owner;
-                    _key = key;
-                    _holder = holder;
-                }
-
-                public void Dispose()
-                {
-                    var holder = Interlocked.Exchange(ref _holder, null);
-                    if (holder is null) return;
-
-                    holder.Semaphore.Release();
-                    _owner.ReleaseRef(_key, holder);
-                }
-            }
-        }
 }
-
-//// -------------------- usage example --------------------
-//public static class Example
-//{
-//    private static readonly KeyedSemaphore Locks = new();
-
-//    public static async Task DemoAsync()
-//    {
-//        // "A" operations are serialized; "B" can run concurrently with "A"
-//        var t1 = DoWork("A", 1);
-//        var t2 = DoWork("A", 2);
-//        var t3 = DoWork("B", 3);
-
-//        await Task.WhenAll(t1, t2, t3);
-//    }
-
-//    private static async Task DoWork(string key, int id)
-//    {
-//        using (await Locks.AcquireAsync(key))
-//        {
-//            Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] start  id={id} key={key}");
-//            await Task.Delay(250);
-//            Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] finish id={id} key={key}");
-//        }
-//    }
-//}

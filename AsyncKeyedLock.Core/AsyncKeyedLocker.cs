@@ -1,4 +1,4 @@
-﻿namespace Zerto.PromotionWorker.Accessors.JournalCache.KeyedLock;
+﻿namespace AsyncKeyedLock.Core;
 
 /// <summary>
 /// Represents a thread-safe keyed locker that allows you to lock based on a key (keyed semaphores), only allowing a specified number of concurrent threads that share the same key.
@@ -13,7 +13,7 @@ public class AsyncKeyedLocker : IDisposable
         m_dictionary = new AsyncKeyedLockDictionary<string>(StringComparer.OrdinalIgnoreCase);
     }
 
-    public async ValueTask<IDisposable> LockAsync(string key, CancellationToken cancellationToken)
+    public async ValueTask<IDisposable> LockAsync(string key, CancellationToken cancellationToken = default)
     {
         AsyncKeyedLockReleaser<string> releaser = GetOrAdd(key);
         try
