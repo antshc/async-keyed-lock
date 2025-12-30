@@ -1,4 +1,5 @@
 using AsyncKeyedLock.Core;
+using FluentAssertions;
 using System.Collections.Concurrent;
 using System.Reflection;
 using Xunit.Abstractions;
@@ -7,6 +8,40 @@ namespace AsyncKeyedLock.Tests
 {
     public sealed class AsyncKeyedLockerTests
     {
+        [Fact]
+        public async Task LockAsync_WhenCancelled_ShouldReleaseKeyedSemaphoreAndThrowOperationCanceledException()
+        {
+            // Arrange
+            var dictionary = new AsyncKeyedLocker();
+            var cancelledCancellationToken = new CancellationToken(true);
+
+            // Act
+            Func<Task> action = async () =>
+            {
+                using var _ = await dictionary.LockAsync("test", cancelledCancellationToken);
+            };
+            await action.Should().ThrowAsync<OperationCanceledException>();
+
+            // Assert
+            dictionary.IsInUse("test").Should().BeFalse();
+        }
+
+        [Fact]
+        public async Task LockAsync_WhenNotCancelled_ShouldReturnDisposable()
+        {
+            // Arrange
+            var dictionary = new AsyncKeyedLocker();
+            var cancellationToken = default(CancellationToken);
+
+            // Act
+            var releaser = await dictionary.LockAsync("test", cancellationToken);
+
+            // Assert
+            dictionary.IsInUse("test").Should().BeTrue();
+            releaser.Dispose();
+            dictionary.IsInUse("test").Should().BeFalse();
+        }
+
         [Fact]
         public async Task LockAsync_SameKey_IsMutuallyExclusive()
         {

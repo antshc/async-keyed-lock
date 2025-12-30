@@ -31,5 +31,23 @@ public class AsyncKeyedLocker : IDisposable
 
     private AsyncKeyedLockReleaser<string> GetOrAdd(string key) => m_dictionary.GetOrAdd(key);
 
+    public bool IsInUse(string key)
+    {
+        if (!m_dictionary.TryGetValue(key, out var result))
+        {
+            return false;
+        }
+
+
+        Monitor.Enter(result);
+        if (result.IsNotInUse)
+        {
+            Monitor.Exit(result);
+            return false;
+        }
+        Monitor.Exit(result);
+        return true;
+    }
+
     public void Dispose() => m_dictionary.Dispose();
 }
