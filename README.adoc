@@ -11,7 +11,80 @@ Below are the *main challenges* and *best practices* to solve them, mapped direc
 * AsyncKeyedLockDictionary
 * AsyncKeyedLockReleaser
 
-== 1) Race conditions between “get lock object” and “remove lock object”
+== Reentrancy behavior
+
+=== The challenge 
+
+NOTE: This code implements a *non-reentrant asynchronous keyed lock*.
+
+A reentrancy scenario occurs when the *same logical async flow* attempts to
+acquire the same key more than once before releasing it.
+
+Because the lock is implemented using a per-key `SemaphoreSlim` with a
+maximum count of 1, a second acquisition for the same key will wait until
+the first one is released. If both acquisitions happen in the same async
+flow, this results in a self-deadlock.
+
+[source,csharp]
+----
+await using (await locker.LockAsync("K", ct))
+{
+    // Lock for "K" is held here
+
+    await using (await locker.LockAsync("K", ct))
+    {
+        // This code is never reached
+    }
+}
+----
+
+The implementation does not track ownership or recursion depth and therefore
+cannot distinguish between different callers and the same caller re-entering
+the lock.
+
+---
+
+=== Best practices
+
+To avoid self-deadlocks and undefined behavior:
+
+* Do not acquire the same key recursively within the same async call chain
+* Acquire the keyed lock at the lowest layer that actually requires exclusivity
+* Avoid locking at orchestration or coordination layers
+* Pass already-acquired data downward instead of re-acquiring the lock
+* Treat the keyed lock as a per-key async mutex, not as a reentrant monitor
+
+If reentrancy detection is required, it should be implemented explicitly on
+top of this library (for example, by detecting re-entry and throwing an
+exception).
+
+---
+
+=== Why this matters
+
+Supporting reentrancy in async code requires:
+
+* Tracking logical ownership across async continuations
+* Flowing context via `AsyncLocal`
+* Maintaining recursion depth per key
+* Releasing the underlying semaphore only at the outermost scope
+
+This significantly increases implementation complexity, memory overhead,
+and the risk of subtle leaks or correctness bugs.
+
+For common use cases such as file IO, blob caching, and per-key write
+serialization, reentrancy usually indicates a design issue rather than a
+legitimate requirement.
+
+By remaining non-reentrant, this library favors:
+
+* Simplicity and predictability
+* Clear usage semantics
+* Lower overhead under high concurrency
+* Safer lifecycle management of per-key lock objects
+
+
+== Race conditions between “get lock object” and “remove lock object”
 
 === The challenge
 
@@ -50,7 +123,7 @@ If you get this wrong, you don’t just get a crash — you get *silent correctn
 * two operations with the same key run concurrently,
 * corrupted files, caches, DB rows, or blob objects.
 
-== 2) Cancellation: avoiding refcount leaks and “stuck forever” entries
+== Cancellation: avoiding refcount leaks and “stuck forever” entries
 
 === The challenge
 
@@ -89,7 +162,7 @@ If it corrupts bookkeeping, you’ll see:
 * growing dictionary contention,
 * mysterious performance degradation over days or weeks.
 
-== 3) Avoiding global contention and scaling with many keys
+== Avoiding global contention and scaling with many keys
 
 === The challenge
 
@@ -119,7 +192,7 @@ A keyed lock reduces contention vs a global lock — unless you accidentally:
 Keyed locks are used in *hot paths* (IO pipelines, caching, dedupe).
 If the lock manager becomes the bottleneck, you lose the optimization entirely.
 
-== 4) Lifetime management: cleanup, disposal, and “too many keys”
+== Lifetime management: cleanup, disposal, and “too many keys”
 
 === The challenge
 
@@ -156,7 +229,7 @@ high-cardinality keys + long-running service
 = “works in tests” → fails after a week due to memory/GC pressure
 ----
 
-== 5) Fairness and starvation: hot keys
+== Fairness and starvation: hot keys
 
 === The challenge
 
@@ -183,7 +256,7 @@ high-cardinality keys + long-running service
 Starvation doesn’t throw exceptions.
 It shows up as *random latency spikes* and stuck operations on hot keys.
 
-== 6) “Correct release” discipline: double-release & mis-ownership
+== “Correct release” discipline: double-release & mis-ownership
 
 === The challenge
 
@@ -212,7 +285,7 @@ await using var _ = await locker.LockAsync(key, ct);
 Keyed locks protect correctness-critical resources.
 A single double-release can silently break exclusivity.
 
-== 7) Async vs sync boundaries: mixing Monitor with await
+== Async vs sync boundaries: mixing Monitor with await
 
 === The challenge
 
@@ -237,7 +310,7 @@ This is the difference between:
 * a safe async lock manager, and
 * a deadlock generator.
 
-== 8) Preventing Resurrection of “Dead” Lock Objects (The Retry Loop Challenge)
+== Preventing Resurrection of “Dead” Lock Objects (The Retry Loop Challenge)
 
 === The challange
 
@@ -377,6 +450,20 @@ ____
 
 The retry loop is the mechanism that bridges this gap and makes the keyed-lock implementation correct under extreme concurrency.
 
+
+
+== Specific topics tied to your challenge
+
+Here are some keywords you can search/read that directly match the challenge you’re solving:
+
+- “Safe publication / safe initialization under concurrency”
+- “Reference counting in concurrent systems”
+- “Object resurrection / ABA problem”
+- “Linearizability vs. serializability”
+- “Concurrent hash map entry lifecycle”
+- “Per-key lock manager patterns”
+- “Cancellation + resource cleanup”
+- “Race between creation and removal”
 
 == Testing async code
 
